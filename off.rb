@@ -1,8 +1,18 @@
 #!/usr/bin/env ruby
 
 require 'set'
+require 'find'
 
 class Project
+  IGNORED_DIRS = %w(autom4te.cache blib _build .bzr .cdv cover_db CVS _darcs ~.dep ~.dot .git .hg ~.nib .pc ~.plst RCS SCCS _sgbak .svn)
+
+  IGNORED_FILES = [
+    /~$/,           # Unix backup files
+    /\#.+\#$/,      # Emacs swap files
+    /core\.\d+$/,   # core dumps
+    /[._].*\.swp$/, # Vi(m) swap files
+  ]
+
   def initialize(path=nil)
     self.root = path && File.expand_path(path) || Dir.pwd
   end
@@ -16,8 +26,15 @@ class Project
   end
 
   def scan_root
-    root_path_size = @root.size
-    @paths = Dir.glob(@root + "/**/*", File::FNM_DOTMATCH).select { |p| File.file?(p) } # TODO: ignore .git/.svn/.bak/...
+    @paths = []
+    Find.find(@root) do |path|
+      if File.directory?(path)
+        Find.prune if IGNORED_DIRS.include?(File.basename(path))
+      else
+        @paths << path unless IGNORED_FILES.any? { |pattern| path =~ pattern }
+      end
+    end
+
     @char_to_path_map = {}
     @paths.each do |path|
       File.basename(path).downcase.each_char do |char|
@@ -30,13 +47,14 @@ class Project
   def files_with_characters(chars)
     result = @char_to_path_map[chars[0]]
     chars[1..-1].each_char do |char|
-      result &= @char_to_path_map[char]
+      result = @char_to_path_map[char] & result
     end
     result
   end
 
   def search(chars)
-    Search.new(files_with_characters(chars), chars).result
+    # Search.new(files_with_characters(chars), chars).result
+    Search.new(@paths, chars).result
   end
 end
 
@@ -66,6 +84,7 @@ class Search
     regexp = Regexp.new(pattern)
 
     matches = []
+    puts @set.size
     @set && @set.each do |path|
       if m = File.basename(path).match(regexp)
         matches << { :matcher => m, :path => path }
@@ -83,7 +102,9 @@ begin
     if line =~ /^setroot (.*)/
       project.root = $1
     elsif line =~ /^search (.*)/
+      start = Time.now
       result = project.search($1)
+      puts Time.now - start
       result.each_with_index do |e, i|
         puts "#{File.basename(e[:path])}|#{e[:path]}|#{e[:score]}" # TODO: mark matched chars
       end
