@@ -3,114 +3,133 @@
 require 'set'
 require 'find'
 
-class Project
-  IGNORED_DIRS = %w(autom4te.cache blib _build .bzr .cdv cover_db CVS _darcs ~.dep ~.dot .git .hg ~.nib .pc ~.plst RCS SCCS _sgbak .svn)
+module OpenFileFast
 
-  IGNORED_FILES = [
-    /~$/,           # Unix backup files
-    /\#.+\#$/,      # Emacs swap files
-    /core\.\d+$/,   # core dumps
-    /[._].*\.swp$/, # Vi(m) swap files
-  ]
+  class Directory
+    IGNORED_DIRS = %w(autom4te.cache blib _build .bzr .cdv cover_db CVS _darcs ~.dep ~.dot .git .hg ~.nib .pc ~.plst RCS SCCS _sgbak .svn)
 
-  def initialize(path=nil)
-    self.root = path && File.expand_path(path) || Dir.pwd
-  end
+    IGNORED_FILES = [
+      /~$/,           # Unix backup files
+      /\#.+\#$/,      # Emacs swap files
+      /core\.\d+$/,   # core dumps
+      /[._].*\.swp$/, # Vi(m) swap files
+    ]
 
-  def root=(path)
-    path = path[0..-2] if path.end_with?("/")
-    if path != @root
-      @root = path
-      scan_root
+    attr_reader :rescan_needed
+
+    def initialize(path=nil)
+      @state = nil
+      @root = path && File.expand_path(path) || Dir.pwd
+      @root = @root[0..-2] if @root.end_with?("/")
+      rescan
     end
-  end
 
-  def scan_root
-    @paths = []
-    Find.find(@root) do |path|
-      if File.directory?(path)
-        Find.prune if IGNORED_DIRS.include?(File.basename(path))
+    def schedule_rescan
+      if @state == :rescan
+        return
+      elsif @state == :search
+        @rescan_needed = true
+        return
       else
-        @paths << path unless IGNORED_FILES.any? { |pattern| path =~ pattern }
+        rescan
       end
     end
 
-    @char_to_path_map = {}
-    @paths.each do |path|
-      File.basename(path).downcase.each_char do |char|
-        set = (@char_to_path_map[char] ||= Set.new)
-        set.add(path)
+    def rescan
+      @state = :rescan
+      @paths = []
+
+      Find.find(@root) do |path|
+        if File.directory?(path)
+          Find.prune if IGNORED_DIRS.include?(File.basename(path))
+        else
+          @paths << path unless IGNORED_FILES.any? { |pattern| path =~ pattern }
+        end
+      end
+
+      @char_to_path_map = {}
+      @paths.each do |path|
+        File.basename(path).downcase.each_char do |char|
+          set = (@char_to_path_map[char] ||= Set.new)
+          set.add(path)
+        end
+      end
+
+      @rescan_needed = false
+      @state = nil
+    end
+
+    def files_with_characters(chars)
+      result = @char_to_path_map[chars[0]]
+      chars[1..-1].each_char do |char|
+        result = @char_to_path_map[char] & result
+      end
+      result
+    end
+
+    def search(chars)
+      @state = :search
+      # Search.new(files_with_characters(chars), chars).result
+      result = Search.new(@paths, chars).result
+      @state = nil
+      result
+    end
+  end
+
+  class Search
+    def initialize(set, chars)
+      @set = set
+      @chars = chars
+    end
+
+    def sorted(matches)
+      now = Time.now
+      matches.sort_by do |elem|
+        matcher = elem[:matcher]
+        dist = 0
+        1.upto(matcher.size-2) do |i|
+          dist += matcher.begin(i+1) - matcher.begin(i) - 1
+        end
+        elem[:score] = dist + (now - File.mtime(elem[:path])).to_f / 86400.0 # TODO: handle Errno::ENOENT
       end
     end
-  end
 
-  def files_with_characters(chars)
-    result = @char_to_path_map[chars[0]]
-    chars[1..-1].each_char do |char|
-      result = @char_to_path_map[char] & result
+    def result
+      pattern = "^(?:[_.])?"
+      @chars.each_char do |char|
+        pattern << "(#{Regexp.escape(char)}).*?"
+      end
+      regexp = Regexp.new(pattern)
+
+      matches = []
+      @set && @set.each do |path|
+        if m = File.basename(path).match(regexp)
+          matches << { :matcher => m, :path => path }
+        end
+      end
+
+      sorted(matches)
     end
-    result
-  end
-
-  def search(chars)
-    # Search.new(files_with_characters(chars), chars).result
-    Search.new(@paths, chars).result
   end
 end
 
-class Search
-  def initialize(set, chars)
-    @set = set
-    @chars = chars
+if $0 == __FILE__
+  directory = OpenFileFast::Directory.new(ARGV.first)
+
+  Signal.trap("USR1") do
+    directory.schedule_rescan
   end
 
-  def sorted(matches)
-    now = Time.now
-    matches.sort_by do |elem|
-      matcher = elem[:matcher]
-      dist = 0
-      1.upto(matcher.size-2) do |i|
-        dist += matcher.begin(i+1) - matcher.begin(i) - 1
-      end
-      elem[:score] = dist + (now - File.mtime(elem[:path])).to_f / 86400.0
-    end
-  end
-
-  def result
-    pattern = "^(?:[_.])?"
-    @chars.each_char do |char|
-      pattern << "(#{Regexp.escape(char)}).*?"
-    end
-    regexp = Regexp.new(pattern)
-
-    matches = []
-    puts @set.size
-    @set && @set.each do |path|
-      if m = File.basename(path).match(regexp)
-        matches << { :matcher => m, :path => path }
-      end
-    end
-
-    sorted(matches)
-  end
-end
-
-project = Project.new(ARGV.first)
-
-begin
-  while (line = STDIN.readline.strip)
-    if line =~ /^setroot (.*)/
-      project.root = $1
-    elsif line =~ /^search (.*)/
-      start = Time.now
-      result = project.search($1)
-      puts Time.now - start
+  while !STDIN.eof?
+    line = STDIN.readline.strip
+    if line.size > 0
+      result = directory.search(line)
       result.each_with_index do |e, i|
         puts "#{File.basename(e[:path])}|#{e[:path]}|#{e[:score]}" # TODO: mark matched chars
       end
-      puts
-      STDOUT.flush
     end
+    puts
+    STDOUT.flush
+    directory.rescan if directory.rescan_needed
   end
-rescue EOFError
 end
