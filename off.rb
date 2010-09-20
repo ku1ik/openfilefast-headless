@@ -39,6 +39,8 @@ module OpenFileFast
       @state = :rescan
       @paths = []
 
+      return false unless File.directory?(@root)
+
       Find.find(@root) do |path|
         if File.directory?(path)
           Find.prune if IGNORED_DIRS.include?(File.basename(path))
