@@ -92,7 +92,9 @@ module OpenFileFast
         1.upto(matcher.size-2) do |i|
           dist += matcher.begin(i+1) - matcher.begin(i) - 1
         end
-        elem[:score] = dist + (now - File.mtime(elem[:path])).to_f / 86400.0 # TODO: handle Errno::ENOENT
+        elem[:score] = dist + (now - File.lstat(elem[:path]).mtime).to_f / 86400.0
+        # TODO: handle Errno::ENOENT
+        # TODO: lstat reports mtime from link itself, we should expand symlink to actual path
       end
     end
 
